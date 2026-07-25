@@ -1,0 +1,133 @@
+// Prisma schema for LeadFlow.
+//
+// Models: User, Lead, Note, Activity — per docs/DATA_MODEL.md.
+//
+// Lead deletion is SOFT DELETE only (see docs/DATA_MODEL.md):
+//   - Lead.deletedAt (nullable DateTime) marks a lead as deleted.
+//   - A lead is "active" when deletedAt IS NULL.
+//   - The application never issues a hard DELETE on a Lead row; the
+//     DELETE /api/leads/:id endpoint (implemented in a later phase)
+//     sets deletedAt instead.
+//   - Notes and Activities are NEVER cascade-deleted by a soft delete,
+//     because a soft delete is just an UPDATE — cascade rules don't
+//     even apply to it. They exist below purely as a defensive
+//     DB-level backstop in case a Lead row is ever hard-deleted
+//     outside the application (e.g. manual DB operation): Restrict
+//     blocks that operation instead of silently destroying audit
+//     history, forcing whoever attempts it to consciously handle
+//     Notes/Activities first.
+//
+// Deletion/FK behavior:
+//   Lead -> Note:      Restrict (see above; soft delete never touches this)
+//   Lead -> Activity:  Restrict (see above; soft delete never touches this)
+//   User -> Lead (assignedTo): SetNull (unassign rather than block/orphan)
+//   User -> Note (author):     Restrict (a user who authored notes cannot be deleted)
+//   User -> Activity (actor):  SetNull (audit row survives; actor becomes anonymous)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  PROPOSAL
+  WON
+  LOST
+}
+
+enum ActivityType {
+  LEAD_CREATED
+  LEAD_ASSIGNED
+  STATUS_CHANGED
+  NOTE_ADDED
+  LEAD_UPDATED
+  LEAD_DELETED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(MEMBER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  assignedLeads Lead[]     @relation("LeadAssignedTo")
+  notes         Note[]     @relation("NoteAuthor")
+  activities    Activity[] @relation("ActivityActor")
+
+  @@index([role])
+  @@map("users")
+}
+
+model Lead {
+  id           String     @id @default(cuid())
+  name         String
+  email        String
+  phone        String?
+  company      String?
+  message      String?
+  source       String?
+  status       LeadStatus @default(NEW)
+  assignedToId String?
+  deletedAt    DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  assignedTo User?      @relation("LeadAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  notes      Note[]
+  activities Activity[]
+
+  @@index([status])
+  @@index([assignedToId])
+  @@index([createdAt])
+  @@index([deletedAt])
+  @@map("leads")
+}
+
+model Note {
+  id        String   @id @default(cuid())
+  content   String
+  leadId    String
+  authorId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lead   Lead @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  author User @relation("NoteAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([leadId])
+  @@index([authorId])
+  @@map("notes")
+}
+
+model Activity {
+  id        String       @id @default(cuid())
+  leadId    String
+  actorId   String?
+  type      ActivityType
+  metadata  Json?
+  createdAt DateTime     @default(now())
+
+  lead  Lead  @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  actor User? @relation("ActivityActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([leadId])
+  @@index([createdAt])
+  @@index([type])
+  @@map("activities")
+}
